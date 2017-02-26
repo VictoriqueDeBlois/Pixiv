@@ -1,18 +1,20 @@
 # encoding=utf-8
-import random
+import datetime
+import multiprocessing
 import os
-import requests
+import queue
+import random
 import re
+import sqlite3
+import threading
 import time
 import zipfile
-import sqlite3
+from functools import reduce
 from shutil import rmtree
+
+import requests
 from PIL import Image
 from bs4 import BeautifulSoup
-from functools import reduce
-import multiprocessing
-import threading
-import queue
 from pixivpy3 import *
 
 
@@ -829,7 +831,7 @@ class PixivSpiderLogin(object):
             current_method = u"收藏"
         elif method == "member":
             pass
-            # TODO 获取个人资料不知道有什么用就没有写了
+            # FIXME 获取个人资料不知道有什么用就没有写了
             return
         else:
             print("no such method")
@@ -1528,6 +1530,7 @@ class PixivSpiderLogin(object):
                 else:
                     print(e)
                     queue_for_contents.put(None)
+                    conn.close()
                     return
             conn.commit()
             while True:
@@ -1539,6 +1542,7 @@ class PixivSpiderLogin(object):
                     try:
                         conn.execute('INSERT INTO pixiv_ranking (illust_id) VALUES (?)', (illust_id,))
                     except sqlite3.Error:
+                        conn.execute('update pixiv_ranking set latest = 1 where illust_id = ?', (illust_id,))
                         continue
                     view_count = item['view_count']
                     user_id = item['user_id']
@@ -1802,44 +1806,134 @@ class PixivSpiderLogin(object):
 
     # 参数:
     # db_path 数据库地址
-    # word 搜索关键词
+    # word_and 包含全部关键词 (使用 list tuple等 将关键字组合一起)
+    # word_or 包含其中任意一个关键词 (使用 list tuple等 将关键字组合一起)
+    # word_not 排除的关键词 (使用 list tuple等 将关键字组合一起)
     # save_img 是否保存缩略图
     # php? php参数
     # s_mode: 部分一致: s_tag 标签, s_tc 标题/简介; 完全一致: s_tag_full, s_tc_full
     # type: illust 插画, ugoira 动图, manga 漫画, 缺省 综合
     # order: date 按旧排序, 缺省 按最新排序
-    # scd: %Y-%m-%d 在这个日期及以后
-    # ecd: %Y-%m-%d 在这个日期及以前
+    # scd: %Y-%m-%d 在这个日期及以后 还可以%Y%m%d; %Y/%m/%d; %Y %m %d; %Y\%m\%d
+    # ecd: %Y-%m-%d 在这个日期及以前 同上
     # r18: 1 仅限R18
     # ratio: 长宽比: 0.5 横长, -0.5 高长, 0 正方形(可以其他值, 算法未知)
-    # wgt: 横长大于像素
-    # wlt: 横长小于像素
-    # hgt: 高度大于像素
-    # hlt: 高度小于像素
+    # wlt: 横长大于该像素值
+    # wgt: 横长小于该像素值
+    # hlt: 高度大于该像素值
+    # hgt: 高度小于该像素值
+    # weight_range: 横长像素范围 支持list tulpe: (-1表示无穷) e.g (-1, 1000); str: (\d+|\s*)\-(\d+|\s*) e.g 1000-
+    # height_range: 高度像素范围 同上
     # tool: 工具, 缺省 全部工具
-    def run_pixiv_search_update_database(self, db_path, word, **kwargs):
+    def run_pixiv_search_update_database(self, db_path, word_and, word_or=None, word_not=None, exact_match=False,
+                                         **kwargs):
         self.create_pixiv_papi_database(db_path)
         base_url = 'http://www.pixiv.net/search.php?'
-        # TODO word-and word-or word-not
-        # TODO size value \d+-\d+
-        # TODO s_mode _full
+        # 参数处理
+        word = []
+        if word_and:
+            if isinstance(word_and, str):
+                word_and = (word_and,)
+            word_and = set(word_and)
+            word.append(reduce(lambda x, y: x + ' ' + y, word_and))
+
+        if word_or:
+            if isinstance(word_or, str):
+                word_or = (word_or,)
+            word_or = set(word_or)
+            word.append('(' + reduce(lambda x, y: x + ' OR ' + y, word_or) + ')')
+
+        if word_not:
+            if isinstance(word_not, str):
+                word_not = (word_not,)
+            word_not = set(word_not)
+            word.append(reduce(lambda x, y: x + ' ' + y, map(lambda x: '-' + x, word_not)))
+
+        if not word:
+            print('关键字错误')
+            return
+
+        word = reduce(lambda x, y: x + ' ' + y, word)
         params = {'word': word}
 
         if 's_mode' in kwargs:
-            params['s_mode'] = kwargs['s_mode']
+            s_mode = kwargs['s_mode']
+            if exact_match and s_mode.find('_full') == -1:
+                s_mode += '_full'
+            params['s_mode'] = s_mode
+        else:
+            if exact_match:
+                params['s_mode'] = 's_tag_full'
+            else:
+                params['s_mode'] = 's_tag'
         if 'type' in kwargs:
             params['type'] = kwargs['type']
         if 'order' in kwargs:
             params['order'] = kwargs['order']
         if 'scd' in kwargs:
-            # TODO 对于日期统一化
-            params['scd'] = kwargs['scd']
+            m = re.match(r'(\d{4})[-\\/\s.]*(\d{2})[-\\/\s.]*(\d{2})', kwargs['scd'])
+            if m:
+                try:
+                    scd_date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except TryError as error:
+                    print(error)
+                    return
+            else:
+                print('日期格式错误')
+                return
+            params['scd'] = scd_date
         if 'ecd' in kwargs:
-            params['ecd'] = kwargs['ecd']
+            m = re.match(r'(\d{4})[-\\/\s.]*(\d{2})[-\\/\s.]*(\d{2})', kwargs['ecd'])
+            if m:
+                try:
+                    ecd_date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except TryError as error:
+                    print(error)
+                    return
+            else:
+                print('日期格式错误')
+                return
+            params['ecd'] = ecd_date
         if 'r18' in kwargs:
             params['r18'] = kwargs['r18']
         if 'ratio' in kwargs:
             params['ratio'] = kwargs['ratio']
+        if 'weight_range' in kwargs:
+            weight_range = kwargs['weight_range']
+            if isinstance(weight_range, str):
+                m = re.match(r'(\d+|\s*)-(\d+|\s*)', weight_range)
+                if m:
+                    if m.group(1) != '':
+                        params['wlt'] = m.group(1)
+                    if m.group(2) != '':
+                        params['wgt'] = m.group(2)
+                else:
+                    print('范围输入出错')
+            elif isinstance(weight_range, (list, tuple)):
+                if weight_range[0] != -1:
+                    params['wlt'] = weight_range[0]
+                if weight_range[1] != -1:
+                    params['wgt'] = weight_range[1]
+            else:
+                raise TryError('unexcept type')
+        if 'height_range' in kwargs:
+            height_range = kwargs['height_range']
+            if isinstance(height_range, str):
+                m = re.match(r'(\d+|\s*)-(\d+|\s*)', height_range)
+                if m:
+                    if m.group(1) != '':
+                        params['hlt'] = m.group(1)
+                    if m.group(2) != '':
+                        params['hgt'] = m.group(2)
+                else:
+                    print('范围输入出错')
+            elif isinstance(height_range, (list, tuple)):
+                if height_range[0] != -1:
+                    params['hlt'] = height_range[0]
+                if height_range[1] != -1:
+                    params['hgt'] = height_range[1]
+            else:
+                raise TryError('unexcept type')
         if 'wgt' in kwargs:
             params['wgt'] = kwargs['wgt']
         if 'wlt' in kwargs:
@@ -1929,6 +2023,16 @@ class PixivSpiderLogin(object):
             bar = ProgressBar(db_path.split('/')[-1], count_badge, run_status='正在更新', fin_status='更新完成',
                               unit_transfrom_func=unit_transfrom, time_switch=True)
             conn = sqlite3.connect(db_path)
+            try:
+                conn.execute('update pixiv_papi set latest = 0')
+            except sqlite3.Error as e:
+                if re.search(r'no such column', str(e)):
+                    conn.execute('alter table pixiv_papi add latest boolean')
+                else:
+                    print(e)
+                    conn.close()
+                    return
+            conn.commit()
             count = 0
             t1 = time.time()
             while True:
@@ -1945,6 +2049,7 @@ class PixivSpiderLogin(object):
                     conn.execute('INSERT INTO pixiv_papi (illust_id) VALUES (?)', (illust_id,))
                 except sqlite3.Error:
                     # 失败
+                    conn.execute('update pixiv_papi set latest = 1 where illust_id = ?', (illust_id,))
                     count += 1
                     continue
                 title = response['title']
@@ -2101,6 +2206,8 @@ class PixivSpiderLogin(object):
             illust_ids.append(int(item.img['data-id']))
         _queue.put(illust_ids)
 
+
+# TODO 60420835 debug
 # bookmark_detail.php 收藏详细信息 可以用于搜索
 if __name__ == '__main__':
     modebase = ('daily', 'weekly', 'monthly', 'rookie',
