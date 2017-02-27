@@ -1949,6 +1949,7 @@ class PixivSpiderLogin(object):
         else:
             save_img = False
 
+        # 获取搜索结果数
         html = self.get_html_tree(base_url, params=params)
         count_badge = html.find('span', {'class': 'count-badge'}).get_text()
         m = re.search(r'\d+', count_badge)
@@ -1959,61 +1960,29 @@ class PixivSpiderLogin(object):
             max_p = 1000
             count_badge = 20 * 1000
 
-        illusts = []
-        for li in html.find('section', {'class': 'column-search-result'}).find_all('li', {'class': 'image-item'}):
-            illusts.append(int(li.img['data-id']))
-
+        # 使用PixivAPI 需要账号密码
         papi = PixivAPI()
         papi.login(kwargs['username'], kwargs['password'])
 
-        # pool = multiprocessing.Pool(self.num_processes)
-        queue_for_pool = multiprocessing.Queue()
-        queue_for_pool.put(illusts)
-        queue_for_thread = queue.Queue()
+        # 多线程 多进程 准备
+        pool = multiprocessing.Pool()
+        manager = multiprocessing.Manager()
+
+        queue_for_process = manager.Queue()
         queue_for_value = queue.Queue()
-        max_threading = self.num_threading + 3
 
         # FIXME 在爬取过程中搜索结果更新的处理想不出好的解决方案
 
         def get_illust_id_args():
-            for p in range(2, max_p + 1):
+            for p in range(1, max_p + 1):
                 params['p'] = p
-                yield (params.copy(), queue_for_pool)
+                yield (params.copy(), papi, queue_for_process)
 
         def alloc(func, args_list):
             for args in args_list:
                 t = threading.Thread(target=func, args=args)
                 t.start()
                 yield
-
-        def alloc_process(func, args_list):
-            for args in args_list:
-                p = multiprocessing.Process(target=func, args=args)
-                p.start()
-                yield
-
-        def get_illust_json_use_papi(illust_id):
-            json = papi.works(illust_id)
-            if json['status'] == 'success':
-                for i in json['response']:
-                    queue_for_thread.put(i)
-            else:
-                print(illust_id, '作品获取失败')
-                # 失败算一个进度
-                queue_for_thread.put(1)
-
-        def alloc_get_illust_json():
-            while True:
-                illust_ids = queue_for_pool.get()
-                if illust_ids is None:
-                    break
-                ag = alloc(get_illust_json_use_papi, map(lambda x: (x,), illust_ids))
-                while True:
-                    if threading.active_count() < max_threading:
-                        try:
-                            next(ag)
-                        except StopIteration:
-                            break
 
         def unit_transfrom(data):
             return '%d' % data
@@ -2034,9 +2003,9 @@ class PixivSpiderLogin(object):
                     return
             conn.commit()
             count = 0
-            t1 = time.time()
+            _t1 = time.time()
             while True:
-                response = queue_for_thread.get()
+                response = queue_for_process.get()
                 if response is None:
                     bar.refresh(count)
                     break
@@ -2094,12 +2063,12 @@ class PixivSpiderLogin(object):
                     conn.execute(command, info_list)
                     rowcount += 1
                     count += 1
-                    t2 = time.time()
-                    # 2s 刷新
-                    if (t2 - t1) > 2:
+                    _t2 = time.time()
+                    # 3.5s 刷新
+                    if (_t2 - _t1) > 3.5:
                         bar.refresh(count)
                         count = 0
-                        t1 = t2
+                        _t1 = _t2
                 except Exception as _error:
                     print(_error)
                     bar.refresh(0, status='更新出错')
@@ -2108,32 +2077,18 @@ class PixivSpiderLogin(object):
             conn.close()
             queue_for_value.put(rowcount)
 
-        alloc_thread = threading.Thread(target=alloc_get_illust_json, args=())
         db_consumer_thread = threading.Thread(target=update_database, args=())
         db_consumer_thread.start()
         prev_threading = threading.enumerate()
-        alloc_thread.start()
-
-        cpu_count = multiprocessing.cpu_count()
-        prev_process = multiprocessing.active_children()
-        ap = alloc_process(self.get_illust_id_for_search_process, get_illust_id_args())
-        while True:
-            if len(multiprocessing.active_children()) < cpu_count:
-                try:
-                    next(ap)
-                except StopIteration:
-                    break
-        active_process = multiprocessing.active_children()
-        list(map(lambda p: p.join() if p not in prev_process else p, active_process))
-        queue_for_pool.put(None)
-        alloc_thread.join()
-        runing_threads = threading.enumerate()
-        list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
-        queue_for_thread.put(None)
-        db_consumer_thread.join()
-        row_count = queue_for_value.get()
+        for arg in get_illust_id_args():
+            pool.apply_async(self.get_illust_id_for_search_process, args=arg)
+        pool.close()
+        pool.join()
+        queue_for_process.put(None)
 
         if save_img:
+            queue_for_thread = queue.Queue()
+
             connect = sqlite3.connect(db_path, check_same_thread=False)
             try:
                 cursor = connect.execute('select illust_id, url from pixiv_ranking where latest == 1')
@@ -2184,7 +2139,7 @@ class PixivSpiderLogin(object):
             prev_threading = threading.enumerate()
             a = alloc(get_img, cursor)
             while True:
-                if threading.active_count() < max_threading:
+                if threading.active_count() < self.num_threading:
                     try:
                         next(a)
                     except StopIteration:
@@ -2197,15 +2152,38 @@ class PixivSpiderLogin(object):
             connect.close()
 
     # 在run_pixiv_search_update_database中多进程调用的函数
-    def get_illust_id_for_search_process(self, _params, _queue):
-        illust_ids = []
+    def get_illust_id_for_search_process(self, _params, papi, _queue):
+
+        def alloc(func, args_list):
+            for args in args_list:
+                t = threading.Thread(target=func, args=args)
+                t.start()
+                yield
+
+        def get_illust_json_use_papi(illust_id):
+            json = papi.works(illust_id)
+            if json['status'] == 'success':
+                for i in json['response']:
+                    _queue.put(i)
+            else:
+                print(illust_id, '作品获取失败')
+                # 失败算一个进度
+                _queue.put(1)
+
         _url = 'http://www.pixiv.net/search.php?'
         html_root = self.get_html_tree(_url, params=_params)
         search_result = html_root.find('section', {'class': 'column-search-result'})
-        for item in search_result.find_all('li', {'class': 'image-item'}):
-            illust_ids.append(int(item.img['data-id']))
-        _queue.put(illust_ids)
-
+        args_map = map(lambda item: (int(item.img['data-id']),), search_result.find_all('li', {'class': 'image-item'}))
+        prev_threading = threading.enumerate()
+        a = alloc(get_illust_json_use_papi, args_map)
+        while True:
+            if threading.active_count() < self.num_threading:
+                try:
+                    next(a)
+                except StopIteration:
+                    break
+        runing_threads = threading.enumerate()
+        list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
 
 # TODO 60420835 debug
 # bookmark_detail.php 收藏详细信息 可以用于搜索
@@ -2221,3 +2199,11 @@ if __name__ == '__main__':
     test = PixivSpiderLogin()
     if test.load_cookies():
         print('登录成功')
+    t1 = time.time()
+    test.run_pixiv_search_update_database('test9.db', '百合',
+                                          username=, password=)
+    t2 = time.time()
+    time_s = time.gmtime(t2 - t1)
+    print(time_s)
+    print(time_s[4], time_s[5])
+
