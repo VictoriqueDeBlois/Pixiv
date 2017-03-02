@@ -17,95 +17,31 @@ from PIL import Image
 from bs4 import BeautifulSoup
 from pixivpy3 import *
 
+from progressbar import ProgressBar
+
+
+def run_threading_limited(func, args_list, threading_max):
+    def alloc(_func, _args_list):
+        for args in _args_list:
+            t = threading.Thread(target=_func, args=args)
+            t.start()
+            yield
+
+    threading_max += 1
+    prev_threading = threading.enumerate()
+    a = alloc(func, args_list)
+    while True:
+        if threading.active_count() < threading_max:
+            try:
+                next(a)
+            except StopIteration:
+                break
+    runing_threads = threading.enumerate()
+    list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+
 
 class TryError(requests.exceptions.RequestException):
     pass
-
-
-class ProgressBar(object):
-    def __init__(self, title,
-                 total,
-                 progress=0,
-                 run_status=None,
-                 fin_status=None,
-                 unit_transfrom_func=None,
-                 time_switch=False):
-        self.info = "[%s] %s %s | %s %5.1f%% [%s]"
-        self.title = title
-        self.total = total
-        self.progress = progress
-        self.status = run_status or '正在下载'
-        self.fin_status = fin_status or '下载完成'
-        self.isdone = False
-        if unit_transfrom_func is None:
-            self.unit_transfrom = self.data_size
-        else:
-            self.unit_transfrom = unit_transfrom_func
-        if time_switch:
-            self.last_time = time.time()
-        else:
-            self.last_time = None
-        self.total_data_str = self.unit_transfrom(total)
-        print(self.__get_info(), end='')
-
-    @staticmethod
-    def data_size(data_content):
-        if (data_content / 1024) > 1024:
-            return '%.2f MB' % (data_content / 1024 / 1024)
-        else:
-            return '%.2f KB' % (data_content / 1024)
-
-    def bar(self):
-        if self.total == 0:
-            rate = 1
-        else:
-            rate = self.progress / self.total
-        bar = int(rate * 20)
-        bar = ('|' * bar) + (' ' * (20 - bar))
-        return rate * 100, bar
-
-    def __get_info(self):
-        # [名称]状态 已下载 单位 | 总数 单位 百分比 进度条
-        data_str = self.unit_transfrom(self.progress)
-        rate, bar = self.bar()
-        if 100.0 - rate < 1e-10:
-            self.status = self.fin_status
-        _info = self.info % (self.title, self.status, data_str, self.total_data_str, rate, bar)
-        return _info
-
-    def refresh(self, progress, status=None):
-        if self.isdone:
-            return
-        self.progress += progress
-        remain_str = ''
-        if self.last_time:
-            t = time.time()
-            if progress == 0:
-                remain_str = ' 剩余时间:'
-            else:
-                remain = ((self.total - self.progress) / progress) * (t - self.last_time)
-                # remain < 31536000
-                struct_time = time.gmtime(remain)
-                if struct_time[7] > 1:
-                    remain_str = ' 剩余时间: %d 天 %d 小时' % (struct_time[7] - 1, struct_time[3])
-                elif struct_time[3] > 0:
-                    remain_str = ' 剩余时间: %d 小时 %d 分钟' % (struct_time[3], struct_time[4])
-                elif struct_time[4] > 0:
-                    remain_str = ' 剩余时间: %d 分 %d 秒' % (struct_time[4], struct_time[5])
-                else:
-                    remain_str = ' 剩余时间: %d 秒' % struct_time[5]
-            self.last_time = t
-        if status is None:
-            status = self.status
-        end_str = ''
-        if self.progress >= self.total:
-            end_str = '\n'
-            self.isdone = True
-        elif status != self.status and status != self.fin_status:
-            end_str = '\n'
-            self.status = status
-            self.isdone = True
-        print('\r' + self.__get_info() + remain_str, end=end_str)
 
 
 class Spider(object):
@@ -526,18 +462,18 @@ class PixivSpider(Spider):
 class PixivSpiderLogin(object):
     # path设置保存地址 processes设置最大进程数
     def __init__(self, path='D:/PixivSpider/', num_processes=None, num_threading=10):
-        self.heads = [{"Accept-Language": "zh-CN,zh;q=0.8",
-                       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.10240'},
-                      {"Accept-Language": "zh-CN,zh;q=0.8",
-                       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64; rv:46.0) Gecko/20100101 Firefox/46.0'},
-                      {"Accept-Language": 'zh-CN,zh;q=0.8',
-                       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko'},
-                      {"Accept-Language": "zh-CN,zh;q=0.8",
-                       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.87 Safari/537.36 OPR/37.0.2178.31'},
-                      {"Accept-Language": "zh-CN,zh;q=0.8",
-                       'User-Agent': 'Opera/9.80 (Windows NT 6.1) Presto/2.12.388 Version/12.16'},
-                      {"Accept-Language": "zh-CN,zh;q=0.8",
-                       'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.87 Safari/537.36'}]
+        self.base_headers = [{"Accept-Language": "zh-CN,zh;q=0.8",
+                              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.10240'},
+                             {"Accept-Language": "zh-CN,zh;q=0.8",
+                              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64; rv:46.0) Gecko/20100101 Firefox/46.0'},
+                             {"Accept-Language": 'zh-CN,zh;q=0.8',
+                              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko'},
+                             {"Accept-Language": "zh-CN,zh;q=0.8",
+                              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.87 Safari/537.36 OPR/37.0.2178.31'},
+                             {"Accept-Language": "zh-CN,zh;q=0.8",
+                              'User-Agent': 'Opera/9.80 (Windows NT 6.1) Presto/2.12.388 Version/12.16'},
+                             {"Accept-Language": "zh-CN,zh;q=0.8",
+                              'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.87 Safari/537.36'}]
         self.savePath = path
         self.processPage = ''
         self.content_dict = {'all': dict(daily=10, weekly=10, monthly=10, rookie=6, original=6, male=10, female=10,
@@ -595,7 +531,8 @@ class PixivSpiderLogin(object):
         fp.write('; '.join(['='.join(item) for item in cookies.items()]))
         fp.close()
         self.cookies = cookies
-        resp, s = self.get_response("http://www.pixiv.net/", headers=self.heads[random.randint(0, len(self.heads) - 1)],
+        resp, s = self.get_response("http://www.pixiv.net/",
+                                    headers=self.base_headers[random.randint(0, len(self.base_headers) - 1)],
                                     session=s)
         m = re.search(r'pixiv\.context\.token\s*=\s*\"(.+?)\";', resp.text)
         self.pixiv_context_token = m.group(1)
@@ -627,7 +564,7 @@ class PixivSpiderLogin(object):
     # 获取网页的beautifulsoup
     def get_html_tree(self, url, header=None, params=None):
         if header is None:
-            header = self.heads[random.randint(0, len(self.heads) - 1)]
+            header = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
         resp, s = self.get_response(url, params=params, headers=header, cookies=self.cookies, timeout=50)
         try:
             soup = BeautifulSoup(resp.content, "lxml")
@@ -642,7 +579,7 @@ class PixivSpiderLogin(object):
         while connect is False:
             try:
                 if header is None:
-                    header = self.heads[random.randint(0, len(self.heads) - 1)]
+                    header = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
                 s = requests.Session()
                 req = requests.Request('GET', url=url, params=params, headers=header, cookies=self.cookies)
                 prepped = s.prepare_request(req)
@@ -684,13 +621,6 @@ class PixivSpiderLogin(object):
         # 多图
         elif works_display.div['class'][-1] == '_layout-thumbnail':
             lock = threading.Lock()
-            max_threading = self.num_threading
-
-            def alloc(func, args_list):
-                for args in args_list:
-                    t = threading.Thread(target=func, args=args)
-                    t.start()
-                    yield
 
             def run_thread(func, url, args):
                 item_page = func(url)
@@ -736,25 +666,9 @@ class PixivSpiderLogin(object):
             else:
                 run_thread_args = map(lambda x: (self.get_html_tree,
                                                  "http://www.pixiv.net/" + x.a['href'], download_args), item_container)
-                a = alloc(run_thread, run_thread_args)
-                while True:
-                    if threading.active_count() < max_threading + 1:
-                        try:
-                            next(a)
-                        except StopIteration:
-                            break
-                runing_threads = threading.enumerate()
-                list(map(lambda t: t.join(), runing_threads[1:]))
+                run_threading_limited(run_thread, run_thread_args, self.num_threading)
             # 多线程下载插画
-            a = alloc(self.download_pic, download_args)
-            while True:
-                if threading.active_count() < max_threading + 1:
-                    try:
-                        next(a)
-                    except StopIteration:
-                        break
-            runing_threads = threading.enumerate()
-            list(map(lambda t: t.join(), runing_threads[1:]))
+            run_threading_limited(self.download_pic, download_args, self.num_threading)
         # 动图
         elif works_display.div['class'][-1] == '_ugoku-illust-player-container':
             save_file_name = title + ' by ' + user_name + ' id=' + str(illust_id) + '.zip'
@@ -903,14 +817,15 @@ class PixivSpiderLogin(object):
                    "Connection": "keep-alive",
                    "Host": host,
                    "Referer": page_url,
-                   "User-Agent": self.heads[random.randint(0, len(self.heads) - 1)]["User-Agent"]}
+                   "User-Agent": self.base_headers[random.randint(0, len(self.base_headers) - 1)]["User-Agent"]}
         # GET 请求
         resp, s = self.get_response(pic_url, headers=headers, stream=True, timeout=50)
         if resp.status_code != 200:
             resp.close()
             raise TryError(resp.status_code)
         content_size = int(resp.headers.get('content-length'))
-        progress = ProgressBar(path.split('/')[-1], total=content_size)
+        progress = ProgressBar(path.split('/')[-1], content_size, ProgressBar.data_size,
+                               run_status='正在下载', fin_status='下载完成')
         # 下载保存
         try:
             with open(path, 'wb') as code:
@@ -918,9 +833,10 @@ class PixivSpiderLogin(object):
                 for data in resp.iter_content(chunk_size=1024 * 60):
                     file += data
                     progress.refresh(len(data))
+                progress.close()
                 code.write(file)
         except requests.exceptions.RequestException:
-            progress.refresh(0, status='下载中断')
+            progress.close(unexcept_status='下载中断')
             resp.close()
             os.remove(path)
             self.download_pic(page_url, pic_url, path)
@@ -1003,7 +919,7 @@ class PixivSpiderLogin(object):
         temp = [key for key in params if params[key] == '']
         list(map(lambda x: params.pop(x), temp))
         # 请求页面 若返回4xx 报告错误
-        headers = self.heads[random.randint(0, len(self.heads) - 1)]
+        headers = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
         resp, s = self.get_response(base_url, params=params, headers=headers, cookies=self.cookies)
         if re.match(r'4\d\d', str(resp.status_code)):
             print("发生了错误")
@@ -1024,7 +940,7 @@ class PixivSpiderLogin(object):
         params['p'] = 1
         params['format'] = 'json'
         params['tt'] = tt
-        headers = self.heads[random.randint(0, len(self.heads) - 1)]
+        headers = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
         resp, s = self.get_response(base_url, params=params, headers=headers, cookies=self.cookies, session=s)
         json = resp.json()
         if re.match(r'4\d\d', str(resp.status_code)):
@@ -1065,7 +981,7 @@ class PixivSpiderLogin(object):
         illust_ids = []
         while p <= p_end:
             params['p'] = p
-            headers = self.heads[random.randint(0, len(self.heads) - 1)]
+            headers = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
             resp, s = self.get_response(base_url, params=params, headers=headers, cookies=self.cookies, session=s)
             json = resp.json()
             if re.match(r'4\d\d', str(resp.status_code)):
@@ -1116,7 +1032,7 @@ class PixivSpiderLogin(object):
             sample_illusts = reduce(lambda x, y: x + ',' + y, sample_illusts)
         params = {'type': 'illust', 'sample_illusts': sample_illusts, 'num_recommendations': num_recommendations,
                   'tt': tt}
-        headers = self.heads[random.randint(0, len(self.heads) - 1)]
+        headers = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
         headers['Referer'] = 'http://www.pixiv.net/recommended.php'
         headers['Host'] = 'www.pixiv.net'
         # 获取推荐json
@@ -1307,7 +1223,7 @@ class PixivSpiderLogin(object):
         p = 1
         while finish is False:
             params['p'] = p
-            headers = self.heads[random.randint(0, len(self.heads) - 1)]
+            headers = self.base_headers[random.randint(0, len(self.base_headers) - 1)]
             # 获取json
             resp, s = self.get_response(base_url, params=params, headers=headers, cookies=self.cookies)
             json = resp.json()
@@ -1359,7 +1275,9 @@ class PixivSpiderLogin(object):
                 illust_book_style = item['illust_book_style']
                 user_name = item['user_name']
                 if save_img:
-                    r, s = self.get_response(url, headers=self.heads[random.randint(0, len(self.heads) - 1)], session=s)
+                    r, s = self.get_response(url,
+                                             headers=self.base_headers[random.randint(0, len(self.base_headers) - 1)],
+                                             session=s)
                     img = sqlite3.Binary(r.content)
                 else:
                     img = ''
@@ -1448,23 +1366,17 @@ class PixivSpiderLogin(object):
 
         # GET请求基本信息
         base_url = 'http://www.pixiv.net/ranking.php'
-        header = self.heads
+        header = self.base_headers
         params = {'format': 'json', 'tt': self.pixiv_context_token}
 
         # 线程准备
         queue_for_contents = queue.Queue()
         queue_for_combine = queue.Queue()
+        queue_for_error = queue.Queue()
         value_queue = queue.Queue()
-        max_threading = self.num_threading + 2
 
         # get_combine_info_consumer 使用list
         content_mode_date_p = []
-
-        def alloc(func, args_list):
-            for args in args_list:
-                t = threading.Thread(target=func, args=args)
-                t.start()
-                yield
 
         def get_json_args():
             for item_date in date:
@@ -1479,24 +1391,43 @@ class PixivSpiderLogin(object):
             _headers = header[random.randint(0, len(header) - 1)]
             r, _s = self.get_response(base_url, params=_params, headers=_headers, cookies=self.cookies)
             if re.match(r'4\d\d', str(r.status_code)):
+                error_str = '{} {} {} {}'.format(_params['content'], _params['mode'], _params['date'],
+                                                 r.json()['error'])
+                queue_for_error.put(error_str)
+                queue_for_combine.put(1)
                 return
             queue_for_combine.put(r.json())
 
         def get_combine_info_consumer():
-            total_p = 0
-            bar = ProgressBar('预处理', len(date) * len(content_mode), run_status='处理中', fin_status='处理完成',
-                              unit_transfrom_func=unit_transfrom)
+            total = 0
+            bar = ProgressBar('预处理', len(date) * len(content_mode), ProgressBar.none_transfrom(), run_status='处理中',
+                              fin_status='处理完成')
+            count = 0
+            _t1 = time.time()
             while True:
+                _t2 = time.time()
+                # 0.5s 刷新
+                if (_t2 - _t1) > 0.5:
+                    bar.refresh(count, now_time=_t2)
+                    count = 0
+                    _t1 = _t2
+
                 json = queue_for_combine.get()
                 if json is None:
+                    bar.refresh(count, now_time=time.time())
                     break
+                if json == 1:
+                    count += 1
+                    continue
                 rank_total = int(json['rank_total'])
                 p = rank_total // 50 + (1 if (rank_total % 50) > 0 else 0)
-                total_p += p
+                # total_p += p
+                total += rank_total
                 content_mode_date_p.append((json['content'], json['mode'], json['date'], p))
                 queue_for_contents.put(json['contents'])
-                bar.refresh(1)
-            value_queue.put(total_p)
+                count += 1
+            bar.close()
+            value_queue.put(total)
 
         def get_json_contents_args():
             for combine in content_mode_date_p:
@@ -1517,9 +1448,8 @@ class PixivSpiderLogin(object):
             queue_for_contents.put(_json['contents'])
 
         def update_database_consumer():
-            row_count = 0
-            bar = ProgressBar(db_path.split('/')[-1], total_progress, run_status='正在更新', fin_status='更新完成',
-                              unit_transfrom_func=unit_transfrom, time_switch=True)
+            bar = ProgressBar(db_path.split('/')[-1], total_progress, ProgressBar.none_transfrom(),
+                              run_status='正在更新', fin_status='更新完成')
             conn = sqlite3.connect(db_path)
             try:
                 conn.execute('update pixiv_ranking set latest = 0')
@@ -1533,16 +1463,27 @@ class PixivSpiderLogin(object):
                     conn.close()
                     return
             conn.commit()
+            count = 0
+            _t1 = time.time()
             while True:
                 contents = queue_for_contents.get()
                 if contents is None:
+                    bar.refresh(count, now_time=time.time())
                     break
                 for item in contents:
+                    _t2 = time.time()
+                    # 1.5s 刷新
+                    if (_t2 - _t1) > 1.5:
+                        bar.refresh(count, now_time=_t2)
+                        count = 0
+                        _t1 = _t2
+
                     illust_id = item['illust_id']
                     try:
                         conn.execute('INSERT INTO pixiv_ranking (illust_id) VALUES (?)', (illust_id,))
                     except sqlite3.Error:
                         conn.execute('update pixiv_ranking set latest = 1 where illust_id = ?', (illust_id,))
+                        count += 1
                         continue
                     view_count = item['view_count']
                     user_id = item['user_id']
@@ -1586,70 +1527,55 @@ class PixivSpiderLogin(object):
                                  religion, violent, yuri, furry, sexual, original, thoughts,
                                  _date, illust_type, illust_book_style, user_name, illust_id]
                     command = '''UPDATE pixiv_ranking
-                                 set view_count = ?, user_id = ?, attr = ?, illust_page_count = ?, tags = ?, url = ?, total_score = ?, title = ?, height = ?, width = ?,
-                                 illust_upload_timestamp = ?,
+                                 set view_count = ?, user_id = ?, attr = ?, illust_page_count = ?, tags = ?, url = ?,
+                                 total_score = ?, title = ?, height = ?, width = ?, illust_upload_timestamp = ?,
                                  homosexual = ?, bl = ?, lo = ?, antisocial = ?, grotesque = ?, drug = ?,
                                  religion = ?, violent = ?, yuri = ?, furry = ?, sexual = ?, original = ?, thoughts = ?,
                                  date = ?, illust_type = ?, illust_book_style = ?, user_name = ?, latest = 1
                                  WHERE illust_id = ?'''
                     try:
                         conn.execute(command, info_list)
-                    except Exception as _error:
+                        count += 1
+                    except sqlite3.Error as _error:
                         print(_error)
-                    row_count += 1
-                bar.refresh(1)
+                        bar.close(unexcept_status='数据库出错')
+                        exit()
+            bar.close()
             conn.commit()
             conn.close()
-            value_queue.put(row_count)
-
-        def unit_transfrom(data):
-            return '%d' % data
 
         # 获取rank_total计算总json数量 都是为了进度条
         consumer_thread = threading.Thread(target=get_combine_info_consumer, args=())
         consumer_thread.start()
-        prev_threading = threading.enumerate()
-        a = alloc(get_json, get_json_args())
-        while True:
-            if threading.active_count() < max_threading:
-                try:
-                    next(a)
-                except StopIteration:
-                    break
-        runing_threads = threading.enumerate()
-        list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+        run_threading_limited(get_json, get_json_args(), self.num_threading)
         queue_for_combine.put(None)
         consumer_thread.join()
         total_progress = value_queue.get()
+        while not queue_for_error.empty():
+            print(queue_for_error.get())
 
         # 更新数据库
         consumer_thread = threading.Thread(target=update_database_consumer, args=())
         consumer_thread.start()
-        prev_threading = threading.enumerate()
-        a = alloc(get_json_contents, get_json_contents_args())
-        while True:
-            if threading.active_count() < max_threading:
-                try:
-                    next(a)
-                except StopIteration:
-                    break
-        runing_threads = threading.enumerate()
-        list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+        run_threading_limited(get_json_contents, get_json_contents_args(), self.num_threading)
         queue_for_contents.put(None)
         consumer_thread.join()
-        rowcount = value_queue.get()
 
         # 下载缩略图
         if save_img:
             connect = sqlite3.connect(db_path, check_same_thread=False)
             try:
-                cursor = connect.execute('select illust_id, url from pixiv_ranking where latest == 1')
+                cursor = connect.execute('select illust_id, url from pixiv_ranking where latest == 1 and img is null')
             except sqlite3.Error as error:
                 print(error)
                 return
 
+            sql_count = connect.execute('select count(*) from pixiv_papi where latest == 1 and img is null')
+            row_count = sql_count.fetchall()[0][0]
+
             def get_img(_id, url):
-                r, s = self.get_response(url, headers=self.heads[random.randint(0, len(self.heads) - 1)], stream=True,
+                r, s = self.get_response(url, headers=self.base_headers[random.randint(0, len(self.base_headers) - 1)],
+                                         stream=True,
                                          timeout=50)
                 while True:
                     try:
@@ -1657,47 +1583,39 @@ class PixivSpiderLogin(object):
                         break
                     except requests.exceptions.RequestException:
                         r.close()
-                        r, s = self.get_response(url, headers=self.heads[random.randint(0, len(self.heads) - 1)],
+                        r, s = self.get_response(url, headers=self.base_headers[
+                            random.randint(0, len(self.base_headers) - 1)],
                                                  stream=True, timeout=50, session=s)
                 queue_for_contents.put((img, _id))
 
             def insert_img():
                 count = 0
-                bar = ProgressBar(db_path.split('/')[-1], rowcount, run_status='正在下图', fin_status='更新完成',
-                                  unit_transfrom_func=unit_transfrom_pic, time_switch=True)
-                t1 = time.time()
+                bar = ProgressBar(db_path.split('/')[-1], row_count, ProgressBar.none_transfrom(unit='张'),
+                                  run_status='正在下图',
+                                  fin_status='更新完成')
+                _t1 = time.time()
                 while True:
                     info_tuple = queue_for_contents.get()
                     if info_tuple is None:
-                        bar.refresh(count)
+                        bar.refresh(count, now_time=time.time())
+                        bar.close()
                         break
                     try:
                         connect.execute('update pixiv_ranking set img = ? where illust_id = ?', info_tuple)
                         count += 1
-                        t2 = time.time()
-                        # 2s 刷新
-                        if (t2 - t1) > 2:
-                            bar.refresh(count)
+                        _t2 = time.time()
+                        # 1.5s 刷新
+                        if (_t2 - _t1) > 1.5:
+                            bar.refresh(count, now_time=_t2)
                             count = 0
-                            t1 = t2
+                            _t1 = _t2
                     except sqlite3.Error:
+                        bar.close(unexcept_status='数据库错误')
                         return
-
-            def unit_transfrom_pic(data):
-                return '%d 张' % data
 
             consumer_thread = threading.Thread(target=insert_img, args=())
             consumer_thread.start()
-            prev_threading = threading.enumerate()
-            a = alloc(get_img, cursor)
-            while True:
-                if threading.active_count() < max_threading:
-                    try:
-                        next(a)
-                    except StopIteration:
-                        break
-            runing_threads = threading.enumerate()
-            list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+            run_threading_limited(get_img, cursor, self.num_threading)
             queue_for_contents.put(None)
             consumer_thread.join()
             connect.commit()
@@ -1967,9 +1885,7 @@ class PixivSpiderLogin(object):
         # 多线程 多进程 准备
         pool = multiprocessing.Pool()
         manager = multiprocessing.Manager()
-
         queue_for_process = manager.Queue()
-        queue_for_value = queue.Queue()
 
         # FIXME 在爬取过程中搜索结果更新的处理想不出好的解决方案
 
@@ -1978,19 +1894,9 @@ class PixivSpiderLogin(object):
                 params['p'] = p
                 yield (params.copy(), papi, queue_for_process)
 
-        def alloc(func, args_list):
-            for args in args_list:
-                t = threading.Thread(target=func, args=args)
-                t.start()
-                yield
-
-        def unit_transfrom(data):
-            return '%d' % data
-
         def update_database():
-            rowcount = 0
-            bar = ProgressBar(db_path.split('/')[-1], count_badge, run_status='正在更新', fin_status='更新完成',
-                              unit_transfrom_func=unit_transfrom, time_switch=True)
+            bar = ProgressBar(db_path.split('/')[-1], count_badge, ProgressBar.none_transfrom(), run_status='正在更新',
+                              fin_status='更新完成')
             conn = sqlite3.connect(db_path)
             try:
                 conn.execute('update pixiv_papi set latest = 0')
@@ -2005,15 +1911,26 @@ class PixivSpiderLogin(object):
             count = 0
             _t1 = time.time()
             while True:
+                _t2 = time.time()
+                # 1.5s 刷新
+                if (_t2 - _t1) > 1.5:
+                    bar.refresh(count, now_time=_t2)
+                    count = 0
+                    _t1 = _t2
+
                 response = queue_for_process.get()
+
                 if response is None:
-                    bar.refresh(count)
+                    bar.refresh(count, now_time=time.time())
+                    bar.close()
                     break
                 # 失败
                 if response == 1:
                     count += 1
                     continue
+
                 illust_id = int(response['id'])
+
                 try:
                     conn.execute('INSERT INTO pixiv_papi (illust_id) VALUES (?)', (illust_id,))
                 except sqlite3.Error:
@@ -2021,6 +1938,7 @@ class PixivSpiderLogin(object):
                     conn.execute('update pixiv_papi set latest = 1 where illust_id = ?', (illust_id,))
                     count += 1
                     continue
+
                 title = response['title']
                 tags = response['tags']
                 if tags:
@@ -2061,25 +1979,16 @@ class PixivSpiderLogin(object):
                              WHERE illust_id = ?'''
                 try:
                     conn.execute(command, info_list)
-                    rowcount += 1
                     count += 1
-                    _t2 = time.time()
-                    # 3.5s 刷新
-                    if (_t2 - _t1) > 3.5:
-                        bar.refresh(count)
-                        count = 0
-                        _t1 = _t2
                 except Exception as _error:
                     print(_error)
-                    bar.refresh(0, status='更新出错')
-                    return
+                    bar.close(unexcept_status='更新出错')
+                    exit()
             conn.commit()
             conn.close()
-            queue_for_value.put(rowcount)
 
         db_consumer_thread = threading.Thread(target=update_database, args=())
         db_consumer_thread.start()
-        prev_threading = threading.enumerate()
         for arg in get_illust_id_args():
             pool.apply_async(self.get_illust_id_for_search_process, args=arg)
         pool.close()
@@ -2091,13 +2000,17 @@ class PixivSpiderLogin(object):
 
             connect = sqlite3.connect(db_path, check_same_thread=False)
             try:
-                cursor = connect.execute('select illust_id, url from pixiv_ranking where latest == 1')
+                cursor = connect.execute('select illust_id, url from pixiv_papi where latest == 1 and img is null')
             except sqlite3.Error as error:
                 print(error)
                 return
 
+            sql_count = connect.execute('select count(*) from pixiv_papi where latest == 1 and img is null')
+            row_count = sql_count.fetchall()[0][0]
+
             def get_img(_id, url):
-                r, s = self.get_response(url, headers=self.heads[random.randint(0, len(self.heads) - 1)], stream=True,
+                r, s = self.get_response(url, headers=self.base_headers[random.randint(0, len(self.base_headers) - 1)],
+                                         stream=True,
                                          timeout=50)
                 while True:
                     try:
@@ -2105,47 +2018,40 @@ class PixivSpiderLogin(object):
                         break
                     except requests.exceptions.RequestException:
                         r.close()
-                        r, s = self.get_response(url, headers=self.heads[random.randint(0, len(self.heads) - 1)],
+                        r, s = self.get_response(url, headers=self.base_headers[
+                            random.randint(0, len(self.base_headers) - 1)],
                                                  stream=True, timeout=50, session=s)
                 queue_for_thread.put((img, _id))
 
             def insert_img():
                 count = 0
-                bar = ProgressBar(db_path.split('/')[-1], row_count, run_status='正在下图', fin_status='更新完成',
-                                  unit_transfrom_func=unit_transfrom_pic, time_switch=True)
-                t1 = time.time()
+                bar = ProgressBar(db_path.split('/')[-1], row_count, ProgressBar.none_transfrom('张'), run_status='正在下图',
+                                  fin_status='更新完成')
+                _t1 = time.time()
                 while True:
+                    _t2 = time.time()
+                    # 1.5s 刷新
+                    if (_t2 - _t1) > 1.5:
+                        bar.refresh(count, now_time=_t2)
+                        count = 0
+                        _t1 = _t2
+
                     info_tuple = queue_for_thread.get()
                     if info_tuple is None:
-                        bar.refresh(count)
+                        bar.refresh(count, now_time=time.time())
+                        bar.close()
                         break
                     try:
-                        connect.execute('update pixiv_ranking set img = ? where illust_id = ?', info_tuple)
+                        connect.execute('update pixiv_papi set img = ? where illust_id = ?', info_tuple)
                         count += 1
-                        t2 = time.time()
-                        # 2s 刷新
-                        if (t2 - t1) > 2:
-                            bar.refresh(count)
-                            count = 0
-                            t1 = t2
-                    except sqlite3.Error:
-                        return
-
-            def unit_transfrom_pic(data):
-                return '%d 张' % data
+                    except sqlite3.Error as _error:
+                        print(_error)
+                        bar.close(unexcept_status='数据库出错')
+                        exit()
 
             consumer_thread = threading.Thread(target=insert_img, args=())
             consumer_thread.start()
-            prev_threading = threading.enumerate()
-            a = alloc(get_img, cursor)
-            while True:
-                if threading.active_count() < self.num_threading:
-                    try:
-                        next(a)
-                    except StopIteration:
-                        break
-            runing_threads = threading.enumerate()
-            list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+            run_threading_limited(get_img, cursor, self.num_threading)
             queue_for_thread.put(None)
             consumer_thread.join()
             connect.commit()
@@ -2153,12 +2059,6 @@ class PixivSpiderLogin(object):
 
     # 在run_pixiv_search_update_database中多进程调用的函数
     def get_illust_id_for_search_process(self, _params, papi, _queue):
-
-        def alloc(func, args_list):
-            for args in args_list:
-                t = threading.Thread(target=func, args=args)
-                t.start()
-                yield
 
         def get_illust_json_use_papi(illust_id):
             json = papi.works(illust_id)
@@ -2174,16 +2074,8 @@ class PixivSpiderLogin(object):
         html_root = self.get_html_tree(_url, params=_params)
         search_result = html_root.find('section', {'class': 'column-search-result'})
         args_map = map(lambda item: (int(item.img['data-id']),), search_result.find_all('li', {'class': 'image-item'}))
-        prev_threading = threading.enumerate()
-        a = alloc(get_illust_json_use_papi, args_map)
-        while True:
-            if threading.active_count() < self.num_threading:
-                try:
-                    next(a)
-                except StopIteration:
-                    break
-        runing_threads = threading.enumerate()
-        list(map(lambda t: t.join() if t not in prev_threading else t, runing_threads[1:]))
+        run_threading_limited(get_illust_json_use_papi, args_map, self.num_threading)
+
 
 # TODO 60420835 debug
 # bookmark_detail.php 收藏详细信息 可以用于搜索
@@ -2199,11 +2091,12 @@ if __name__ == '__main__':
     test = PixivSpiderLogin()
     if test.load_cookies():
         print('登录成功')
-    t1 = time.time()
-    test.run_pixiv_search_update_database('test9.db', '百合',
-                                          username=, password=)
-    t2 = time.time()
-    time_s = time.gmtime(t2 - t1)
-    print(time_s)
-    print(time_s[4], time_s[5])
 
+
+    def date_g(_date):
+        while _date != datetime.date.today():
+            _date += datetime.timedelta(1)
+            yield _date.strftime('%Y%m%d')
+
+
+    test.run_pixiv_ranking_update_database_threading('test16.db', mode=modebase, date=date_g(datetime.date(2017, 1, 1)))
