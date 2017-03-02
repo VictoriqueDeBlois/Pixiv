@@ -2,6 +2,16 @@
 import time
 
 
+# 一个自制的进度条:
+# 实例化时参数:
+# title: 标题 str
+# total: 总进度 int
+# progress2str_func: 将进度值转换成str信息的函数 可以自己提供;
+# 该类提供bit转换成适合单位的函数data_size,
+# 不转换数值 后缀单位可选的函数none_transfrom(), 参数: unit: 返回后缀单位是unit的函数 unit=None时没有后缀单位
+# progress: 初始进度
+# run_status: 运行状态信息
+# fin_status: 结束状态信息
 class ProgressBar(object):
     def __init__(self, title, total, progress2str_func, progress=0, run_status=None, fin_status=None):
         self.info = "[{title}] {status} {progress} | {total} {rate:5.1f}% [{bar}]"
@@ -58,6 +68,7 @@ class ProgressBar(object):
         return self.info.format(title=self.title, status=self.status, progress=data_str,
                                 total=self.total_data_str, rate=rate, bar=_bar)
 
+    # 将时间间隔转换成合适的str信息
     @staticmethod
     def use_time(interval):
         struct_time = time.gmtime(interval)
@@ -71,6 +82,7 @@ class ProgressBar(object):
             time_str = '%d 秒' % struct_time[5]
         return time_str
 
+    # 刷新进度条 progress 增加进度; now_time 当前时间戳 当提供时显示剩余时间; add_total 总进度调整 total += add_total
     def refresh(self, progress, now_time=None, add_total=None):
         remain_str = ''
         if self.closed:
@@ -93,6 +105,8 @@ class ProgressBar(object):
         self.last_print_len = len(print_str.encode())
         print('\r' + print_str, end='')
 
+    # 结束进度条 结束后该进度条将无法再刷新 状态改为fin_status 并且显示总用时
+    # unexcept_status: 特殊状态信息 提供时状态改为该值
     def close(self, unexcept_status=None):
         if self.closed:
             return
